@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-multipart
+Pillow
+opencv-python-headless
+PyMuPDF
+numpy
+pandas
+scikit-image
+imutils
+pytesseract
+rapidfuzz
+# ultralytics  # Removed: YOLO replaced by SIFT+Template Matching engine
+zxing-cpp
+pytest
