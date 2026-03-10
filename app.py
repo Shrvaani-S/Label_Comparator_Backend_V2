@@ -189,7 +189,8 @@ def find_differences(imageA, imageB, threshold=0.85, min_area=150):
         return {
             'ssim_score': score,
             'bounding_boxes': bounding_boxes,
-            'total_differences': len(bounding_boxes)
+            'total_differences': len(bounding_boxes),
+            'is_entirely_different': score < 0.6
         }
     except Exception as e:
         print(f"Error finding differences: {e}")
@@ -443,6 +444,66 @@ async def compare_labels(
 
             comp_symbols = comp_symbols_final
 
+            # --- ADVANCED FEATURE COMPARISON: BARCODES ---
+            base_bc_df = base_features_df[base_features_df['Type'] == 'Barcode']
+            comp_bc_df = comp_features_df[comp_features_df['Type'] == 'Barcode']
+
+            added_bc = []
+            deleted_bc = []
+            modified_barcode_details = []
+            modified_barcode_boxes = []
+
+            # Pair barcodes by proximity
+            used_base_indices = set()
+            used_comp_indices = set()
+
+            for i, b_row in base_bc_df.iterrows():
+                b_box = b_row['Box']
+                if b_box is None: continue
+
+                b_center = get_center(b_box)
+                best_match_idx = -1
+                min_dist = 100  # Maximum pairing distance
+
+                for j, c_row in comp_bc_df.iterrows():
+                    if j in used_comp_indices: continue
+                    c_box = c_row['Box']
+                    if c_box is None: continue
+
+                    c_center = get_center(c_box)
+                    dist = math.dist(b_center, c_center)
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_match_idx = j
+
+                if best_match_idx != -1:
+                    used_base_indices.add(i)
+                    used_comp_indices.add(best_match_idx)
+                    c_row = comp_bc_df.loc[best_match_idx]
+
+                    if b_row['Value'] != c_row['Value']:
+                        modified_barcode_details.append(f"From: '{b_row['Value']}' ➔ To: '{c_row['Value']}'")
+                        modified_barcode_boxes.append((b_box, c_row['Box']))
+
+            # Remaining unpaired barcodes are truly added or deleted
+            for i, b_row in base_bc_df.iterrows():
+                if i not in used_base_indices:
+                    deleted_bc.append(b_row['Value'])
+
+            for j, c_row in comp_bc_df.iterrows():
+                if j not in used_comp_indices:
+                    added_bc.append(c_row['Value'])
+            # ---------------------------------------------
+
+            def is_box_barcode(box, features_df):
+                if features_df.empty: return False
+                bc_rows = features_df[features_df['Type'] == 'Barcode']
+                for _, row in bc_rows.iterrows():
+                    bc_box = row.get("Box")
+                    if bc_box and boxes_overlap(box, bc_box, threshold=0.1):
+                        return True
+                return False
+
             ssim_boxes = diff_results['bounding_boxes']
             text_diff_boxes = []
             for box in ssim_boxes:
@@ -452,6 +513,11 @@ async def compare_labels(
                     if boxes_overlap(box_coords, sym["bbox"]): overlap = True; break
                 for sym in comp_symbols_raw:
                     if boxes_overlap(box_coords, sym["bbox"]): overlap = True; break
+
+                # Also exclude barcode regions from text diffing
+                if is_box_barcode(box_coords, base_features_df) or is_box_barcode(box_coords, comp_features_df):
+                    overlap = True
+
                 if not overlap:
                     text_diff_boxes.append(box)
 
@@ -506,7 +572,6 @@ async def compare_labels(
                 if txt_b or txt_c:
                     modified_text.append(f"From: '{txt_b}' ➔ To: '{txt_c}'")
 
-            added_bc, deleted_bc = get_feature_diffs(base_features_df, comp_features_df, 'Barcode')
             added_img, deleted_img = get_feature_diffs(base_features_df, comp_features_df, 'Image')
 
             modified_image_details = []
@@ -562,6 +627,7 @@ async def compare_labels(
 
             for item in added_bc: discrepancy_report["Added"].append({"Category": "Barcode", "Value": item})
             for item in deleted_bc: discrepancy_report["Deleted"].append({"Category": "Barcode", "Value": item})
+            for item in modified_barcode_details: discrepancy_report["Modified"].append({"Category": "Barcode", "Value": item})
 
             for item in added_img: discrepancy_report["Added"].append({"Category": "Image", "Value": item})
             for item in deleted_img: discrepancy_report["Deleted"].append({"Category": "Image", "Value": item})
@@ -617,6 +683,10 @@ async def compare_labels(
             #         child_draw_actions.append((d["bbox"], color_added, "Added", False))
 
             for b_box, c_box in modified_image_boxes:
+                base_draw_actions.append((b_box, color_modified, "Modified", False))
+                child_draw_actions.append((c_box, color_modified, "Modified", False))
+
+            for b_box, c_box in modified_barcode_boxes:
                 base_draw_actions.append((b_box, color_modified, "Modified", False))
                 child_draw_actions.append((c_box, color_modified, "Modified", False))
 

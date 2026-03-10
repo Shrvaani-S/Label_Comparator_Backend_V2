@@ -13,3 +13,4 @@ rapidfuzz
 # ultralytics  # Removed: YOLO replaced by SIFT+Template Matching engine
 zxing-cpp
 pytest
+gunicorn

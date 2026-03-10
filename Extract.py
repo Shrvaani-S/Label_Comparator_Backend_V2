@@ -48,8 +48,16 @@ def _zxing_decode(image):
             try_downscale=True
         )
         for res in zx_results:
-            # ZXing Python bindings return objects with .text and .format properties
-            found.append({"data": res.text, "type": res.format.name})
+            try:
+                p = res.position
+                x1 = min(p.top_left.x, p.bottom_left.x)
+                y1 = min(p.top_left.y, p.top_right.y)
+                x2 = max(p.top_right.x, p.bottom_right.x)
+                y2 = max(p.bottom_left.y, p.bottom_right.y)
+                bbox = [int(x1), int(y1), int(x2), int(y2)]
+            except:
+                bbox = None
+            found.append({"data": res.text, "type": res.format.name, "bbox": bbox})
     except Exception as e:
         print(f"Error in zxing decode: {e}")
     return found
@@ -105,15 +113,15 @@ def extract_barcodes(image):
         
         results.extend(_zxing_decode(processed))
 
-    # 4. De-duplicate results
+    # 4. De-duplicate results while preserving boxes
     unique_barcodes = []
     seen = set()
     for res in results:
         data = res['data']
         if data not in seen:
             seen.add(data)
-            unique_barcodes.append(data)
-            
+            unique_barcodes.append({"data": data, "bbox": res.get("bbox")})
+
     return unique_barcodes
 
 # ---------------------------------------------------------
@@ -201,9 +209,10 @@ def extract_all_features(image, precomputed_symbols, logo_folder="logos"):
     features = []
 
     # 1. Advanced Barcode Extraction (Includes Agentic Scanner Logic)
-    barcodes = extract_barcodes(image)
-    for bc in barcodes:
-        features.append({"Type": "Barcode", "Value": bc, "Box": None})
+    barcodes_raw = extract_barcodes(image)
+    barcode_values = [b["data"] for b in barcodes_raw]
+    for bc in barcodes_raw:
+        features.append({"Type": "Barcode", "Value": bc["data"], "Box": bc["bbox"]})
 
     # 2. Logo / Image Extraction (Now powered by RANSAC)
     logos = detect_logos(image, logo_folder)
@@ -220,13 +229,52 @@ def extract_all_features(image, precomputed_symbols, logo_folder="logos"):
         gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
     else:
         gray = np_img
-        
+
     gray = cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+
+    # Get HOCR data for bbox lookups on OCR-detected barcodes
+    ocr_data = pytesseract.image_to_data(gray, lang='eng+fra+deu', output_type=pytesseract.Output.DICT)
     ocr_text = pytesseract.image_to_string(gray, lang='eng+fra+deu')
-    
+
+    # Convert barcodes to compact strings for robust duplicate checking
+    barcode_compact = [re.sub(r'\s+', '', bc).lower() for bc in barcode_values]
+
     for line in ocr_text.split('\n'):
-        clean_text = re.sub(r'[|><_~=«»"]', '', line).strip()
-        if len(clean_text) > 2 and any(c.isalnum() for c in clean_text) and clean_text not in barcodes:
-            features.append({"Type": "Text", "Value": clean_text, "Box": None})
+        clean_text = re.sub(r'[|><_~=«»"*;]', '', line).strip()
+        compact_text = re.sub(r'\s+', '', clean_text).lower()
+
+        if len(clean_text) > 2 and any(c.isalnum() for c in clean_text):
+            # Check if this text is basically an extracted barcode
+            is_barcode_already_found = any(compact_text in bc or bc in compact_text for bc in barcode_compact if len(bc) > 4)
+
+            # Heuristic for undetected 1D barcodes that OCR picks up
+            looks_like_raw_barcode = (
+                len(compact_text) > 10 and
+                compact_text.isalnum() and
+                clean_text.isupper() and
+                not any(c.islower() for c in clean_text) and
+                sum(c.isdigit() for c in clean_text) > 2
+            )
+
+            if is_barcode_already_found:
+                continue  # Skip, it's already a barcode feature
+            elif looks_like_raw_barcode:
+                # Find coarse box from OCR data for this text
+                bbox = None
+                try:
+                    for i, word in enumerate(ocr_data['text']):
+                        if compact_text in re.sub(r'\s+', '', word).lower():
+                            x, y, w, h = ocr_data['left'][i], ocr_data['top'][i], ocr_data['width'][i], ocr_data['height'][i]
+                            # Scale back down (we resized by 1.5x)
+                            bbox = [int(x/1.5), int(y/1.5), int((x+w)/1.5), int((y+h)/1.5)]
+                            break
+                except:
+                    pass
+
+                barcode_values.append(clean_text)
+                barcode_compact.append(compact_text)
+                features.append({"Type": "Barcode", "Value": clean_text, "Box": bbox})
+            else:
+                features.append({"Type": "Text", "Value": clean_text, "Box": None})
 
     return pd.DataFrame(features)
